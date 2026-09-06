@@ -14,12 +14,12 @@ async def collect_hsmoa_schedule():
         )
         page = await context.new_page()
 
-        print("1. 편성표 페이지 접속...")
+        print("1. 홈쇼핑모아 편성표 접속...")
         await page.goto("https://trend.hsmoa-ad.com/schedule", timeout=60000)
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3000)
 
-        # 2. '홈쇼핑 전체 편성표' 탭 확실히 클릭
+        # 2. '홈쇼핑 전체 편성표' 탭 클릭
         try:
             all_tab = page.locator("text='홈쇼핑 전체 편성표'").first
             if await all_tab.is_visible():
@@ -28,67 +28,67 @@ async def collect_hsmoa_schedule():
         except Exception:
             pass
 
-        # 3. 카테고리: [식품] -> [건강식품] 정확히 클릭
+        # 3. 카테고리: [식품] -> [건강식품] 필터 적용
         try:
-            # 식품 클릭
             food_btn = page.locator("button, div, span").filter(has_text=re.compile(r"^식품$")).first
             if await food_btn.is_visible():
                 await food_btn.click()
                 await page.wait_for_timeout(1500)
 
-            # 건강식품 클릭
             health_btn = page.locator("button, div, span, label").filter(has_text=re.compile(r"^건강식품$")).first
             if await health_btn.is_visible():
                 await health_btn.click()
                 await page.wait_for_timeout(3000)
-                print("2. [식품 > 건강식품] 필터 선택 완료")
+                print("2. [식품 > 건강식품] 카테고리 필터 적용 완료")
         except Exception as e:
             print(f"카테고리 선택 참고: {e}")
 
-        # 4. 70건의 방송 카드가 모두 DOM에 로드되도록 충분히 스크롤 (타임라인 로딩)
-        print("전체 70건 방송 데이터 로딩 중...")
-        for _ in range(15):
+        # 4. 당일 편성된 전체 방송 카드가 로딩되도록 바닥까지 무한 스크롤
+        print("당일 전체 건강식품 방송 데이터 로딩 중...")
+        last_height = await page.evaluate("document.body.scrollHeight")
+        
+        for _ in range(20):  # 충분한 횟수로 당일 전체 타임라인 로드
             await page.mouse.wheel(0, 3000)
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(500)
+            new_height = await page.evaluate("document.body.scrollHeight")
+            if new_height == last_height and _ > 10:
+                break
+            last_height = new_height
 
         items = []
         today_str = datetime.today().strftime('%Y-%m-%d')
-
-        # 5. 건강식품 편성표 카드 영역만 '정확한 컨테이너'로 추출
-        # 전체 div 스캔 대신, 실제로 가격("원")과 시간 정보가 같이 들어있는 방송 카드 단위 추출
-        cards = await page.query_selector_all("div[class*='item'], div[class*='card'], div[class*='schedule'], a[href*='product']")
-
         seen_keys = set()
+
+        # 5. 당일 편성 카드 추출 및 개별 셀 데이터 파싱
+        cards = await page.query_selector_all("div[class*='item'], div[class*='card'], div[class*='schedule'], a[href*='product']")
 
         for card in cards:
             try:
-                # 카드 내부 텍스트 추출
                 text = await card.inner_text()
                 if not text or "원" not in text:
                     continue
 
                 lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-                # 방송시간, 상품명, 가격 파싱
                 air_time = ""
                 title = ""
                 price = ""
 
                 for line in lines:
-                    # 방송 시간 (예: 10:20~11:30, 오전 09:10, 14:00)
+                    # 방송 시간 파싱
                     if re.search(r'\d{1,2}:\d{2}', line) or "오전" in line or "오후" in line:
                         if not air_time:
                             air_time = line
-                    # 가격 (예: 159,000원)
+                    # 가격 파싱
                     elif re.search(r'[\d,]+원', line):
                         if not price:
                             price = line
-                    # 상품명 (방송사 브랜드명, 배송 관련 문구 제외)
-                    elif len(line) >= 4 and "원" not in line and not any(b in line for b in ["CJ", "GS", "현대", "롯데", "NS", "홈앤", "공영", "신세계", "KT", "SK", "쇼핑", "무료배송", "적립", "방송"]):
+                    # 품목명 파싱 (홈쇼핑사명 및 무관한 배송/적립 문구 제외)
+                    elif len(line) >= 3 and "원" not in line and not any(b in line for b in ["CJ", "GS", "현대", "롯데", "NS", "홈앤", "공영", "신세계", "KT", "SK", "쇼핑", "무료배송", "적립", "방송"]):
                         if not title:
                             title = line
 
-                # 유효 데이터 검증 (상품명과 가격이 존재하고, 중복이 아닌 경우)
+                # 유효 데이터 검증 및 순수 당일 전체 데이터 수집
                 if title and price:
                     unique_key = f"{air_time}_{title}_{price}"
                     if unique_key not in seen_keys:
@@ -104,13 +104,13 @@ async def collect_hsmoa_schedule():
 
         await browser.close()
 
-        print(f"총 수집된 건수: {len(items)}건")
+        print(f"오늘 당일 수집된 총 건강식품 건수: {len(items)}건")
 
         if not items:
             print("수집된 데이터가 없습니다.")
             return
 
-        # 6. 저장 (수집일자, 방송시간, 품목명, 가격 4개 셀)
+        # 6. 개별 셀 저장 (수집일자, 방송시간, 품목명, 가격)
         df = pd.DataFrame(items)
 
         os.makedirs("data/daily", exist_ok=True)
