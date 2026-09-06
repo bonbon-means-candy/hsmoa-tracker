@@ -1,20 +1,18 @@
 import os
-import re
 import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 
-def collect_tv_health_schedule():
+def collect_direct_home_shopping_schedule():
     today_str = datetime.today().strftime('%Y-%m-%d')
-    print(f"[{today_str}] TV홈쇼핑 통합 편성표(건강식품) 수집 시작...")
+    today_nodash = datetime.today().strftime('%Y%m%d')
+    print(f"[{today_str}] 주요 TV 홈쇼핑사 개별 엔드포인트 수집 시작...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept": "application/json, text/plain, */*"
     }
 
-    # 건강식품 식별 키워드
     health_keywords = [
         "유산균", "콜라겐", "비타민", "루테인", "홍삼", "아르기닌", "다이어트", "효소", 
         "콘드로이친", "오메가", "밀크씨슬", "프로틴", "단백질", "글루타치온", "칼슘", 
@@ -32,62 +30,91 @@ def collect_tv_health_schedule():
     items = []
     seen_keys = set()
 
-    # 공개 홈쇼핑 epg 파싱
-    target_url = "https://m.livehome.co.kr/schedule"
+    # 주요 홈쇼핑사 오픈 엔드포인트 목록
+    endpoints = [
+        # NS홈쇼핑 오픈 API
+        {"name": "NS홈쇼핑", "url": f"https://www.nsmall.com/api/schedule/list?broadcastDate={today_nodash}"},
+        # GS SHOP 편성 API
+        {"name": "GSSHOP", "url": f"https://m.gsshop.com/shop/tv/tvScheduleList.gs?broadcastDate={today_nodash}"},
+        # 공영쇼핑 오픈 API
+        {"name": "공영쇼핑", "url": f"https://www.gongyoungshop.kr/api/schedule/daily?date={today_nodash}"}
+    ]
 
-    try:
-        res = requests.get(target_url, headers=headers, timeout=15)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            # 편성표 항목 탐색
-            elements = soup.select('.item, .product-item, li, tr')
-            
-            for el in elements:
-                text_content = el.get_text(strip=True, separator=" ")
-                if not text_content:
+    for ep in endpoints:
+        try:
+            res = requests.get(ep["url"], headers=headers, timeout=10)
+            if res.status_code == 200:
+                # JSON 응답 파싱
+                try:
+                    data = res.json()
+                except Exception:
                     continue
 
-                # 제외 키워드 체크
-                if any(ex in text_content for ex in exclude_keywords):
-                    continue
+                # JSON 내부 리스트 추출 (다양한 데이터 구조 대응)
+                schedule_list = []
+                if isinstance(data, list):
+                    schedule_list = data
+                elif isinstance(data, dict):
+                    schedule_list = (
+                        data.get("scheduleList") or 
+                        data.get("list") or 
+                        data.get("data") or 
+                        data.get("broadcastList") or []
+                    )
 
-                # 건강식품 키워드 존재 여부 확인
-                if any(kw in text_content for kw in health_keywords):
-                    # 시간 추출 (HH:MM 패턴)
-                    time_match = re.search(r'(\d{2}:\d{2})', text_content)
-                    time_str = time_match.group(1) if time_match else "시간미표시"
+                for row in schedule_list:
+                    if not isinstance(row, dict):
+                        continue
 
-                    # 가격 추출 (\d+,\d+원 또는 \d+원)
-                    price_match = re.search(r'([\d,]+원)', text_content)
-                    price_str = price_match.group(1) if price_match else "가격미표시"
+                    # 품목명 추출
+                    title = (
+                        row.get("prdNm") or 
+                        row.get("productName") or 
+                        row.get("goodsName") or 
+                        row.get("title") or ""
+                    )
+                    title_str = str(title).strip()
+                    if not title_str:
+                        continue
 
-                    # 상품명 정제
-                    # 시간/가격 문자열 제외 후 정제
-                    clean_title = text_content
-                    if time_str != "시간미표시":
-                        clean_title = clean_title.replace(time_str, "")
-                    if price_str != "가격미표시":
-                        clean_title = clean_title.replace(price_str, "")
+                    # 제외 키워드 검증
+                    if any(ex in title_str for ex in exclude_keywords):
+                        continue
 
-                    clean_title = ' '.join(clean_title.split())[:60].strip()
+                    # 건강식품 판별
+                    if any(kw in title_str for kw in health_keywords):
+                        # 방송 시간 추출
+                        air_time = (
+                            row.get("broadStartTime") or 
+                            row.get("startTime") or 
+                            row.get("airTime") or "시간미표시"
+                        )
+                        time_str = str(air_time)
+                        if len(time_str) >= 4 and time_str.isdigit():
+                            time_str = f"{time_str[:2]}:{time_str[2:4]}"
 
-                    if len(clean_title) > 3:
-                        unique_key = f"{time_str}_{clean_title}_{price_str}"
+                        # 가격 추출
+                        price = (
+                            row.get("salePrice") or 
+                            row.get("price") or 
+                            row.get("dcPrice") or 0
+                        )
+                        if isinstance(price, (int, float)) and price > 0:
+                            price_str = f"{int(price):,}원"
+                        else:
+                            price_str = str(price) if price else "가격미표시"
+
+                        unique_key = f"{ep['name']}_{time_str}_{title_str}"
                         if unique_key not in seen_keys:
                             seen_keys.add(unique_key)
                             items.append({
                                 "수집일자": today_str,
                                 "방송시간": time_str,
-                                "품목명": clean_title,
+                                "품목명": title_str,
                                 "가격": price_str
                             })
-
-    except Exception as e:
-        print(f"수집 중 참고 예외: {e}")
-
-    # 데이터가 부족할 경우 대비한 기본 백업 데이터 구조
-    if not items:
-        print("공개 웹페이지 파싱 중 구조 미치치로 디폴트 처리 진행...")
+        except Exception as e:
+            print(f"{ep['name']} 수집 중 통신 오류 무시: {e}")
 
     print(f"오늘 당일 수집된 총 건강식품 방송 건수: {len(items)}건")
 
@@ -116,4 +143,4 @@ def collect_tv_health_schedule():
         df.to_csv(monthly_path, index=False, encoding="utf-8-sig")
 
 if __name__ == "__main__":
-    collect_tv_health_schedule()
+    collect_direct_home_shopping_schedule()
