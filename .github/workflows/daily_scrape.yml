@@ -1,0 +1,27 @@
+name: Daily Scraper
+
+on:
+  schedule:
+    - cron: '30 14 * * *' # 매일 밤 11:30 (한국시간) 자동 실행
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - run: |
+        python -m pip install --upgrade pip
+        pip install pandas playwright
+        playwright install chromium
+        playwright install-deps
+    - run: python collector.py
+    - run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add data/
+        git diff --staged --quiet || git commit -m "Auto update"
+        git push
