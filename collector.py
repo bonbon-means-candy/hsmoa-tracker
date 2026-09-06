@@ -1,18 +1,14 @@
 import os
-import requests
 import pandas as pd
 from datetime import datetime
+from curl_cffi import requests
 
-def collect_direct_home_shopping_schedule():
+def collect_bypassed_home_shopping_schedule():
     today_str = datetime.today().strftime('%Y-%m-%d')
     today_nodash = datetime.today().strftime('%Y%m%d')
-    print(f"[{today_str}] 주요 TV 홈쇼핑사 개별 엔드포인트 수집 시작...")
+    print(f"[{today_str}] TLS 차단 우회 엔진 기반 건강식품 편성표 수집 시작...")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*"
-    }
-
+    # 건강식품 핵심 키워드
     health_keywords = [
         "유산균", "콜라겐", "비타민", "루테인", "홍삼", "아르기닌", "다이어트", "효소", 
         "콘드로이친", "오메가", "밀크씨슬", "프로틴", "단백질", "글루타치온", "칼슘", 
@@ -30,81 +26,58 @@ def collect_direct_home_shopping_schedule():
     items = []
     seen_keys = set()
 
-    # 주요 홈쇼핑사 오픈 엔드포인트 목록
-    endpoints = [
-        # NS홈쇼핑 오픈 API
-        {"name": "NS홈쇼핑", "url": f"https://www.nsmall.com/api/schedule/list?broadcastDate={today_nodash}"},
-        # GS SHOP 편성 API
-        {"name": "GSSHOP", "url": f"https://m.gsshop.com/shop/tv/tvScheduleList.gs?broadcastDate={today_nodash}"},
-        # 공영쇼핑 오픈 API
-        {"name": "공영쇼핑", "url": f"https://www.gongyoungshop.kr/api/schedule/daily?date={today_nodash}"}
+    # 한국 크롬 브라우저 지문(Fingerprint) 위장 세션 생성
+    session = requests.Session(impersonate="chrome120")
+
+    # API 엔드포인트 목록
+    urls = [
+        f"https://www.nsmall.com/api/schedule/list?broadcastDate={today_nodash}",
+        f"https://m.gsshop.com/shop/tv/tvScheduleList.gs?broadcastDate={today_nodash}",
+        f"https://www.gongyoungshop.kr/api/schedule/daily?date={today_nodash}"
     ]
 
-    for ep in endpoints:
+    for target_url in urls:
         try:
-            res = requests.get(ep["url"], headers=headers, timeout=10)
+            res = session.get(target_url, timeout=10)
             if res.status_code == 200:
-                # JSON 응답 파싱
-                try:
-                    data = res.json()
-                except Exception:
-                    continue
-
-                # JSON 내부 리스트 추출 (다양한 데이터 구조 대응)
-                schedule_list = []
+                data = res.json()
+                
+                schedules = []
                 if isinstance(data, list):
-                    schedule_list = data
+                    schedules = data
                 elif isinstance(data, dict):
-                    schedule_list = (
+                    schedules = (
                         data.get("scheduleList") or 
                         data.get("list") or 
                         data.get("data") or 
                         data.get("broadcastList") or []
                     )
 
-                for row in schedule_list:
+                for row in schedules:
                     if not isinstance(row, dict):
                         continue
 
-                    # 품목명 추출
-                    title = (
-                        row.get("prdNm") or 
-                        row.get("productName") or 
-                        row.get("goodsName") or 
-                        row.get("title") or ""
-                    )
+                    title = row.get("prdNm") or row.get("productName") or row.get("goodsName") or row.get("title") or ""
                     title_str = str(title).strip()
                     if not title_str:
                         continue
 
-                    # 제외 키워드 검증
                     if any(ex in title_str for ex in exclude_keywords):
                         continue
 
-                    # 건강식품 판별
                     if any(kw in title_str for kw in health_keywords):
-                        # 방송 시간 추출
-                        air_time = (
-                            row.get("broadStartTime") or 
-                            row.get("startTime") or 
-                            row.get("airTime") or "시간미표시"
-                        )
+                        air_time = row.get("broadStartTime") or row.get("startTime") or row.get("airTime") or "시간미표시"
                         time_str = str(air_time)
                         if len(time_str) >= 4 and time_str.isdigit():
                             time_str = f"{time_str[:2]}:{time_str[2:4]}"
 
-                        # 가격 추출
-                        price = (
-                            row.get("salePrice") or 
-                            row.get("price") or 
-                            row.get("dcPrice") or 0
-                        )
+                        price = row.get("salePrice") or row.get("price") or row.get("dcPrice") or 0
                         if isinstance(price, (int, float)) and price > 0:
                             price_str = f"{int(price):,}원"
                         else:
                             price_str = str(price) if price else "가격미표시"
 
-                        unique_key = f"{ep['name']}_{time_str}_{title_str}"
+                        unique_key = f"{time_str}_{title_str}_{price_str}"
                         if unique_key not in seen_keys:
                             seen_keys.add(unique_key)
                             items.append({
@@ -114,7 +87,7 @@ def collect_direct_home_shopping_schedule():
                                 "가격": price_str
                             })
         except Exception as e:
-            print(f"{ep['name']} 수집 중 통신 오류 무시: {e}")
+            print(f"호출 오류 참고 ({target_url}): {e}")
 
     print(f"오늘 당일 수집된 총 건강식품 방송 건수: {len(items)}건")
 
@@ -143,4 +116,4 @@ def collect_direct_home_shopping_schedule():
         df.to_csv(monthly_path, index=False, encoding="utf-8-sig")
 
 if __name__ == "__main__":
-    collect_direct_home_shopping_schedule()
+    collect_bypassed_home_shopping_schedule()
