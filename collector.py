@@ -14,39 +14,50 @@ async def collect_hsmoa_schedule():
         )
         page = await context.new_page()
 
-        print("1. 페이지 접속 및 로딩 대기...")
+        print("1. 홈쇼핑모아 트렌드랩 편성표 접속...")
         await page.goto("https://trend.hsmoa-ad.com/schedule", timeout=60000)
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3000)
 
-        # 2. 카테고리 필터 선택: 식품 > 건강식품
+        # 2. 카테고리 필터 정밀 클릭 (식품 -> 건강식품)
         try:
-            # 식품 클릭
-            food_element = page.locator("text='식품'").first
-            if await food_element.is_visible():
-                await food_element.click()
+            # '식품' 버튼 클릭
+            food_btn = page.locator("div, button, span").filter(has_text=re.compile(r"^식품$")).first
+            if await food_btn.is_visible():
+                await food_btn.click()
                 await page.wait_for_timeout(1500)
+                print("1차 카테고리 [식품] 클릭 완료")
 
-            # 건강식품 클릭
-            health_element = page.locator("text='건강식품'").first
-            if await health_element.is_visible():
-                await health_element.click()
+            # 하위 '건강식품' 버튼 클릭
+            health_btn = page.locator("div, button, span, label").filter(has_text=re.compile(r"^건강식품$")).first
+            if await health_btn.is_visible():
+                await health_btn.click()
                 await page.wait_for_timeout(3000)
-                print("2. [식품 > 건강식품] 카테고리 선택 완료")
+                print("2차 카테고리 [건강식품] 필터 적용 완료")
+            else:
+                # 텍스트 세부 검색으로 재시도
+                await page.click("text=건강식품")
+                await page.wait_for_timeout(3000)
         except Exception as e:
-            print(f"카테고리 선택 처리 참고: {e}")
+            print(f"카테고리 필터 적용 참고: {e}")
 
-        # 3. 전체 타임라인 로딩을 위한 넓은 범위 스크롤 및 지연
+        # 편성표 타임라인 전체 로딩 (스크롤)
         for _ in range(8):
-            await page.mouse.wheel(0, 2000)
+            await page.mouse.wheel(0, 1500)
             await page.wait_for_timeout(800)
 
         items = []
         today_str = datetime.today().strftime('%Y-%m-%d')
 
-        # 4. 방송 카드 전체 요소 수집 (텍스트 블록 정밀 분석)
-        # 홈쇼핑모아의 모든 링크 및 카드 컨테이너 파싱
-        elements = await page.query_selector_all("main div, a[href*='product'], div[class*='schedule']")
+        # 제외할 일반 식품 키워드 목록 (안전 필터)
+        exclude_keywords = [
+            "김치", "갈비", "돈까스", "만두", "탕", "찌개", "고기", "제육", 
+            "족발", "보쌈", "순대", "떡볶이", "오징어", "굴비", "전복", "빈대떡",
+            "사과", "배", "귤", "샤인머스캣", "쌀", "포도", "고구마", "감자"
+        ]
+
+        # 3. 방영물 요소 파싱
+        elements = await page.query_selector_all("main div, div[class*='schedule'], a[href*='product']")
 
         for elem in elements:
             try:
@@ -54,10 +65,9 @@ async def collect_hsmoa_schedule():
                 if not text:
                     continue
 
-                # '원'이 포함되고 최소 2줄 이상인 방송 정보 덩어리 추출
                 if "원" in text and ("오전" in text or "오후" in text or ":" in text):
                     lines = [l.strip() for l in text.split("\n") if l.strip()]
-                    
+
                     if len(lines) >= 3:
                         air_time = ""
                         channel = ""
@@ -65,25 +75,24 @@ async def collect_hsmoa_schedule():
                         price = ""
 
                         for line in lines:
-                            # 시간 패턴 (예: 오전 10:20, 14:30)
                             if re.search(r'\d{1,2}:\d{2}', line) or "오전" in line or "오후" in line:
                                 if not air_time:
                                     air_time = line
-                            # 가격 패턴 (예: 129,000원)
                             elif re.search(r'[\d,]+원', line):
                                 if not price:
                                     price = line
-                            # 채널명 (CJ, GS, 현대, 롯데, NS, 홈앤, 공영 등)
                             elif any(b in line for b in ["CJ", "GS", "현대", "롯데", "NS", "홈앤", "공영", "신세계", "KT", "SK", "쇼핑"]):
                                 if not channel:
                                     channel = line
-                            # 품목명 (나머지 긴 텍스트)
                             else:
-                                if not title and len(line) >= 4 and "원" not in line:
+                                if not title and len(line) >= 3 and "원" not in line:
                                     title = line
 
-                        # 유효 데이터인 경우 정제 항목 추가
+                        # 일반 식품 키워드가 들어간 상품은 정제 단계에서 제거
                         if title and price:
+                            if any(ex in title for ex in exclude_keywords):
+                                continue
+
                             items.append({
                                 "수집일자": today_str,
                                 "방송시간": air_time if air_time else "시간미표시",
@@ -97,14 +106,13 @@ async def collect_hsmoa_schedule():
         await browser.close()
 
         if not items:
-            print("수집된 데이터가 없습니다.")
+            print("수집된 건강기능식품 데이터가 없습니다.")
             return
 
-        # 5. DataFrame 변환 및 중복 데이터 제거
+        # 4. 개별 셀 저장 및 중복 제거
         df = pd.DataFrame(items)
         df = df.drop_duplicates(subset=["품목명", "가격"])
 
-        # 엑셀 셀 분리 및 UTF-8 BOM 저장
         os.makedirs("data/daily", exist_ok=True)
         os.makedirs("data/monthly", exist_ok=True)
 
@@ -113,7 +121,7 @@ async def collect_hsmoa_schedule():
         monthly_path = f"data/monthly/hsmoa_{month_str}.csv"
 
         df.to_csv(daily_path, index=False, encoding="utf-8-sig")
-        print(f"일간 수집 완료 ({len(df)}건 저장): {daily_path}")
+        print(f"건강기능식품 일간 수집 완료 ({len(df)}건): {daily_path}")
 
         if os.path.exists(monthly_path):
             df_old = pd.read_csv(monthly_path)
